@@ -1,10 +1,11 @@
 'use strict';
 
 const { randomBytes } = require('node:crypto');
+const { setTimeout: delay } = require('node:timers/promises');
 const { startCredentialBroker } = require('./credential-broker');
 const { cancelled, abortable } = require('./cancellation');
 
-/** Owns the sidebar's private credential channel; remote restoration is explicit. */
+/** Owns the sidebar's private credential channel and its remote configuration. */
 class CodexSidebarBridge {
   constructor(session, { startBroker = startCredentialBroker, unavailable = () => {}, log } = {}) {
     this.session = session;
@@ -16,6 +17,7 @@ class CodexSidebarBridge {
     this.closed = false;
     this.available = false;
     this.applied = false;
+    this.prepared = false;
     this.onAbort = () => { void this.close().catch(error => this.log?.warn(error.message)); };
     session.controller.signal.addEventListener('abort', this.onAbort, { once: true });
     if (session.controller.signal.aborted) this.onAbort();
@@ -48,6 +50,7 @@ class CodexSidebarBridge {
       this.broker = broker;
       const result = await tunnel.codex({ operation: 'prepare', owner: this.owner }, { signal });
       prepared = true;
+      this.prepared = true;
       this.check(tunnel);
       this.socketPath = result.socketPath;
       this.version = result.version;
@@ -91,6 +94,27 @@ class CodexSidebarBridge {
     this.check(tunnel);
     if (result.socketPath !== this.socketPath) throw new Error('Codex credential socket ownership changed');
     await this.forward(tunnel);
+  }
+
+  async restore(tunnel) {
+    await this.close();
+    if (!this.applied && !this.prepared) return;
+    const signal = AbortSignal.timeout(15000);
+    let result;
+    while (true) {
+      signal.throwIfAborted();
+      try {
+        result = await tunnel.codex({ operation: 'restore', owner: this.owner }, { signal });
+        break;
+      } catch (error) {
+        // A cancelled apply or the watchdog may briefly hold the account lock.
+        if (error.code !== 'LEASE_BUSY') throw error;
+        await delay(100, undefined, { signal });
+      }
+    }
+    this.applied = false;
+    this.prepared = false;
+    return result;
   }
 
   close() {

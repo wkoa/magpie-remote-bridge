@@ -80,13 +80,21 @@ function fixture(options = {}) {
     stop() { this.stopped = true; }
   }
   class FakeSidebar {
-    constructor(session, opts) { this.session = session; this.options = opts; this.version = 'fixture-codex'; sidebars.push(this); }
+    constructor(session, opts) { this.session = session; this.options = opts; this.owner = 'a'.repeat(32); this.version = 'fixture-codex'; sidebars.push(this); }
     async enable(tunnel, model) {
       this.model = model;
       if (options.sidebarEnable) await options.sidebarEnable(this, tunnel, model);
+      this.applied = true;
     }
     async reconnect(tunnel) { if (options.sidebarReconnect) await options.sidebarReconnect(this, tunnel); }
     async close() { this.closed = true; }
+    async restore(tunnel) {
+      await this.close();
+      if (this.applied) {
+        await tunnel.codex({ operation: 'restore', owner: this.owner });
+        this.applied = false;
+      }
+    }
   }
   activate(context, {
     vscode, readFile: options.readFile || (async () => options.sshConfig || ''),
@@ -103,7 +111,7 @@ function fixture(options = {}) {
   return {
     run: name => commands.get(`magpieBridge.${name}`)(), commands, terminals, tunnels, proxies, sidebars, errors, logs,
     context, state, picks, inputs, infos, warnings, values, status, secrets, clipboard, notifications, executions, external,
-    listeners, vscode, progressMessages, dispose: () => { for (const item of context.subscriptions) item.dispose(); }
+    listeners, vscode, progressMessages, dispose: async () => { for (const item of context.subscriptions) await item.dispose(); }
   };
 }
 

@@ -25,6 +25,7 @@ class BridgeSession extends EventEmitter {
   /** Concurrent callers, including callers during reconnect, share one result. */
   connect() {
     if (this.disposed) return Promise.resolve();
+    if (this.disconnecting) return this.disconnecting.then(() => this.connect());
     if (this.current?.ready) return Promise.resolve(this.current);
     if (this.pending) return this.pending.promise;
 
@@ -205,7 +206,7 @@ class BridgeSession extends EventEmitter {
   }
 
   _active(session) {
-    return this.current === session && !session.stopped && !this.disposed;
+    return this.current === session && !session.stopped && !session.disconnecting && !this.disposed;
   }
 
   _guard(session) {
@@ -241,15 +242,39 @@ class BridgeSession extends EventEmitter {
     this.emit('disconnected');
   }
 
-  /** Cancels prompts, checks, backoff and subprocesses, then revokes the token. */
+  /** Restore an owned sidebar while SSH is usable, then release every resource. */
   disconnect() {
-    if (this.current) this._release(this.current);
-    this._state('disconnected');
+    if (this.disconnecting) return this.disconnecting;
+    const session = this.current;
+    if (!session?.ready || !session.codexIde) {
+      if (session) this._release(session);
+      this._state('disconnected');
+      return;
+    }
+    session.disconnecting = true;
+    session.ready = false;
+    this._clearStable(session);
+    this.disconnecting = Promise.resolve().then(async () => {
+      try {
+        await session.codexIde.restore(session.tunnel);
+        this.deps.log?.info('Codex sidebar cleanup completed before disconnect.');
+      } catch (error) {
+        this.deps.log?.warn('Automatic Codex restoration was not confirmed; remote recovery remains armed.');
+        this.emit('restoreFailure', error);
+      } finally {
+        this._release(session);
+        this.disconnecting = undefined;
+        this._state('disconnected');
+      }
+    });
+    this._state('disconnecting');
+    return this.disconnecting;
   }
 
   dispose() {
-    this.disconnect();
     this.disposed = true;
+    const work = this.disconnect();
+    if (work) return work.finally(() => this.removeAllListeners());
     this.removeAllListeners();
   }
 }

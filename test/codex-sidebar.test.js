@@ -46,6 +46,8 @@ test('credential broker withholds credentials during reconnect and closes stalle
   const broker = await startCredentialBroker('synthetic-capability', { available: () => available });
   t.after(() => broker.close());
   assert.equal((await get(broker.socketPath)).status, 503);
+  const health = await get(broker.socketPath, '/health');
+  assert.equal(health.status, 204); assert.equal(health.body, '');
   available = true; assert.equal((await get(broker.socketPath)).status, 200);
   const stalled = net.createConnection(broker.socketPath);
   await new Promise((resolve, reject) => { stalled.once('connect', resolve); stalled.once('error', reject); });
@@ -129,6 +131,36 @@ test('disconnect during prepare cannot create a credential forward or apply conf
   f.controller.abort(); hold.resolve({ socketPath: '/tmp/prepared/credentials.sock' });
   await assert.rejects(pending, { name: 'AbortError' });
   assert.equal(f.forwards.length, 0); assert.equal(f.calls.length, 1); assert.equal(f.brokerClosed(), 1);
+});
+
+test('automatic restoration closes credentials and restores only its owned lease once', async () => {
+  const f = fixture({ codex: async request => {
+    if (request.operation === 'restore') {
+      assert.equal(f.brokerClosed(), 1); assert.equal(f.forwards[0].forward.stopped, true);
+      return { restored: ['model_provider'], preserved: ['model'] };
+    }
+    return { socketPath: '/tmp/prepared/credentials.sock' };
+  } });
+  await f.sidebar.enable(f.tunnel, 'model');
+  const result = await f.sidebar.restore(f.tunnel);
+  assert.deepEqual(result.preserved, ['model']);
+  assert.deepEqual(f.calls.at(-1).request, { operation: 'restore', owner: f.sidebar.owner });
+  assert.equal(f.calls.at(-1).options.signal.aborted, false);
+  await f.sidebar.restore(f.tunnel);
+  assert.equal(f.calls.filter(call => call.request.operation === 'restore').length, 1);
+});
+
+test('automatic restoration retries a busy account lock after an interrupted write', async () => {
+  let attempts = 0;
+  const f = fixture({ codex: async request => {
+    if (request.operation === 'restore' && ++attempts === 1) {
+      const error = new Error('account lock busy'); error.code = 'LEASE_BUSY'; throw error;
+    }
+    return { socketPath: '/tmp/prepared/credentials.sock' };
+  } });
+  await f.sidebar.enable(f.tunnel, 'model');
+  await f.sidebar.restore(f.tunnel);
+  assert.equal(attempts, 2); assert.equal(f.sidebar.applied, false);
 });
 
 test('failed forwarding cleans a preparation but an interrupted apply retains recovery metadata', async () => {

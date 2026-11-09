@@ -17,6 +17,8 @@ const INSTALL_URLS = Object.freeze({
   claude: 'https://code.claude.com/docs/en/setup'
 });
 
+let shutdown;
+
 /** Wires the VS Code UI to the independently testable bridge lifecycle. */
 function activate(context, dependencies = {}) {
   const vscode = dependencies.vscode || require('vscode');
@@ -55,6 +57,8 @@ function activate(context, dependencies = {}) {
     clock: dependencies.clock,
     reconnect: dependencies.reconnect
   });
+  const dispose = () => { disposed = true; return bridge.dispose(); };
+  shutdown = dispose;
 
   function stateLabel(event) {
     switch (event.state) {
@@ -64,6 +68,7 @@ function activate(context, dependencies = {}) {
       case 'probing': return t('Verifying remote access');
       case 'connected': return t('Connected');
       case 'reconnecting': return t('Reconnecting {0}/{1}', event.attempt, event.maxAttempts);
+      case 'disconnecting': return t('Restoring Codex configuration');
       case 'failed': return t('Connection failed');
       default: return t('Disconnected');
     }
@@ -73,7 +78,7 @@ function activate(context, dependencies = {}) {
     latestState = event;
     const supported = vscode.env.remoteName === 'ssh-remote' && Boolean(vscode.workspace.workspaceFolders?.length);
     if (supported) status.show(); else status.hide();
-    const busy = ['choosing', 'checking', 'connecting', 'probing', 'reconnecting'].includes(event.state);
+    const busy = ['choosing', 'checking', 'connecting', 'probing', 'reconnecting', 'disconnecting'].includes(event.state);
     status.text = `${busy ? '$(sync~spin)' : '$(plug)'} Magpie: ${stateLabel(event)}`;
     status.tooltip = event.session?.config?.host
       ? t('SSH: {0}\nRemote API: http://127.0.0.1:{1}\nClick for bridge actions', event.session.config.host, event.session.config.remotePort)
@@ -86,6 +91,9 @@ function activate(context, dependencies = {}) {
   bridge.on('disconnected', () => {
     for (const terminal of terminals) terminal.dispose();
     terminals.clear();
+  });
+  bridge.on('restoreFailure', () => {
+    if (!disposed) void vscode.window.showWarningMessage(t('Could not confirm automatic Codex restoration. Remote recovery will retry after disconnect. If needed, run Restore Codex Configuration when the server is reachable.'));
   });
 
   async function connect() {
@@ -327,6 +335,7 @@ function activate(context, dependencies = {}) {
           finally { cancellation.dispose(); }
         });
         if (!activeSession(session, tunnel)) return;
+        session.codexIde = undefined;
         await vscode.window.showInformationMessage(t('Codex configuration restored. Preserved {0} fields changed outside Magpie. Start a new Codex chat to use the restored provider.', result.preserved?.length || 0));
       } finally { session.controller.signal.removeEventListener('abort', abort); }
     })().catch(error => { error.bridgeStage ||= 'codexSidebar'; throw error; })
@@ -367,7 +376,7 @@ function activate(context, dependencies = {}) {
     }
     if (value) await context.secrets.store('gatewayKey', value);
     else await context.secrets.delete('gatewayKey');
-    bridge.disconnect();
+    await bridge.disconnect();
     await vscode.window.showInformationMessage(t('Gateway key updated. Connect again to use it.'));
   }
 
@@ -406,7 +415,7 @@ function activate(context, dependencies = {}) {
     gettingStarted: () => vscode.commands.executeCommand('workbench.action.openWalkthrough', 'wkoa.magpie-remote-bridge#magpieBridge.setup', false),
     changeHost: async () => {
       const id = hosts.authority();
-      bridge.disconnect();
+      await bridge.disconnect();
       await hosts.forget(id);
       return connect();
     },
@@ -436,7 +445,7 @@ function activate(context, dependencies = {}) {
       const reconnect = t('Reconnect');
       const selected = await vscode.window.showInformationMessage(t('Bridge connection settings changed. Reconnect to apply them.'), reconnect);
       if (selected === reconnect && !disposed && bridge.current === expectedSession && expectedSession.ready) {
-        bridge.disconnect();
+        await bridge.disconnect();
         await run('connect');
       }
     }),
@@ -446,7 +455,7 @@ function activate(context, dependencies = {}) {
       } catch { bridge.disconnect(); }
       render();
     }),
-    { dispose() { disposed = true; bridge.dispose(); } }
+    { dispose }
   );
   render();
 
@@ -461,4 +470,6 @@ function activate(context, dependencies = {}) {
   } catch { /* Auto-connect only runs in an already configured trusted SSH folder. */ }
 }
 
-module.exports = { activate };
+function deactivate() { return shutdown?.(); }
+
+module.exports = { activate, deactivate };

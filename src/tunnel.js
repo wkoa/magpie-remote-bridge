@@ -106,7 +106,7 @@ class Tunnel extends EventEmitter {
     args.push(this.options.host, 'python3 -I -');
     return this.run(args, { signal, master: this.child, timeoutMs: 60000,
       timeoutMessage: 'Codex sidebar configuration timed out', maxOutputBytes: 32768, safeErrors: true,
-      input: `${source}\nmain(json.loads(base64.b64decode("${data}")))\n`,
+      input: `${source}\nWATCHDOG_SOURCE = base64.b64decode("${Buffer.from(source).toString('base64')}").decode('utf-8')\nmain(json.loads(base64.b64decode("${data}")))\n`,
       parseOutput: body => {
         const replies = stripVTControlCharacters(body).split('\n').flatMap(line => {
           try { const value = JSON.parse(line); return value && typeof value.ok === 'boolean' ? [value] : []; }

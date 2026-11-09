@@ -175,6 +175,49 @@ test('cleanup continues when one resource throws', async () => {
   assert.equal(f.auths[0].closed, true);
 });
 
+test('disconnect restores the sidebar before stopping SSH and serializes a fresh connection', async t => {
+  const f = fixture(); t.after(() => f.session.dispose());
+  const original = await f.session.connect();
+  let finish;
+  original.codexIde = {
+    close() { this.closed = true; },
+    async restore(tunnel) {
+      assert.equal(tunnel, f.tunnels[0]);
+      assert.equal(tunnel.stopped, undefined);
+      await new Promise(resolve => { finish = resolve; });
+    }
+  };
+  const closing = f.session.disconnect();
+  assert.equal(f.session.disconnect(), closing);
+  assert.equal(f.session.state, 'disconnecting');
+  const fresh = f.session.connect(); await flush();
+  assert.equal(f.tunnels.length, 1); assert.equal(f.proxies[0].closed, undefined);
+  finish(); await closing;
+  assert.equal(f.tunnels[0].stopped, true); assert.equal(f.proxies[0].closed, true);
+  assert.notEqual(await fresh, original); assert.equal(f.tunnels.length, 2);
+});
+
+test('failed automatic restoration still revokes resources and reports recovery failure', async () => {
+  const f = fixture(); const original = await f.session.connect();
+  const failures = [];
+  f.session.on('restoreFailure', error => failures.push(error));
+  original.codexIde = { close() {}, async restore() { throw new Error('config conflict'); } };
+  await f.session.disconnect();
+  assert.equal(f.session.state, 'disconnected'); assert.equal(f.session.current, undefined);
+  assert.equal(f.tunnels[0].stopped, true); assert.equal(f.proxies[0].closed, true);
+  assert.equal(failures[0].message, 'config conflict');
+});
+
+test('disposing waits for sidebar restoration and never starts a replacement connection', async () => {
+  const f = fixture(); const original = await f.session.connect();
+  let finish;
+  original.codexIde = { close() {}, restore: () => new Promise(resolve => { finish = resolve; }) };
+  const disposed = f.session.dispose(); await flush();
+  assert.equal(f.tunnels[0].stopped, undefined); assert.equal(await f.session.connect(), undefined);
+  finish(); await disposed;
+  assert.equal(f.tunnels[0].stopped, true); assert.equal(f.session.listenerCount('state'), 0);
+});
+
 test('invalid settings at connection loss report a failure instead of throwing from an event', async () => {
   const f = fixture();
   await f.session.connect();

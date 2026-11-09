@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3
+
+- Automatically restore the remote Codex sidebar configuration before disconnecting, changing hosts or shutting down normally, while preserving later user edits.
+- Arm a detached remote recovery watchdog before setup completes. Restore only the owned lease after 60 seconds of continuous credential-channel loss, including forced window closure; keep short reconnects working.
+- Serialize restoration with new connections, bound shutdown recovery, report unconfirmed restoration and retain explicit recovery for failed writes or older leases.
+
 ## 0.3.2
 
 - Defer buffered-pipe cleanup until RPC unwinding when SIGTERM, SIGHUP or SIGINT interrupts a write, while still terminating and reaping the child immediately.

@@ -32,6 +32,8 @@ codex_home=os.path.join(home,'.codex')
 os.environ['CODEX_HOME']=codex_home
 os.environ.pop('MAGPIE_CODEX_FIXTURE_MODE',None)
 a=Adapter(home=home,binary=fixture,codex_home=codex_home)
+# Most adapter checks isolate config RPC; dedicated tests below run real watchers.
+a.start_watchdog=lambda state: None
 def invoke(operation,**fields):
     return a.dispatch(dict(operation=operation,owner=owner,**fields))
 def expect(code,func):
@@ -139,6 +141,81 @@ assert result['restored']==['model_provider']
 config=read_config()
 assert config['model']=='user-new' and config['model_provider']=='before-provider'
 assert config['model_providers'][PROVIDER]['name']=='User renamed'
+`);
+
+check('Codex detached watchdog retains a live lease then restores after channel loss and preserves user edits', `
+import socketserver,threading
+a=Adapter(home=home,binary=fixture,codex_home=codex_home,watchdog_policy={'interval':0.02,'grace':0.2})
+original={'model':'before','model_provider':'before-provider','unrelated':'keep','model_providers':{}}
+write_config(original)
+p=prepare()
+requests=[]
+class Health(socketserver.BaseRequestHandler):
+    def handle(self):
+        request=self.request.recv(4096);requests.append(request)
+        self.request.sendall(b'HTTP/1.1 204 No Content\\r\\nConnection: close\\r\\n\\r\\n')
+server=socketserver.ThreadingUnixStreamServer(p['socketPath'],Health)
+thread=threading.Thread(target=lambda:server.serve_forever(poll_interval=0.01),daemon=True);thread.start()
+try:
+    apply(p)
+    time.sleep(0.35)
+    assert read_config()['model_provider']==PROVIDER and os.path.exists(a.state_path)
+    assert requests and all(request.startswith(b'GET /health ') for request in requests)
+    config=read_config();config['model']='user-edited';write_config(config)
+finally:
+    server.shutdown();server.server_close();thread.join()
+deadline=time.monotonic()+5
+while os.path.exists(a.state_path) and time.monotonic()<deadline:time.sleep(0.02)
+assert not os.path.exists(a.state_path)
+assert read_config()==dict(original,model='user-edited'),read_config()
+assert not os.path.exists(os.path.dirname(p['socketPath']))
+`);
+
+check('Codex watchdog failure prevents provider writes', `
+original={'model':'before','model_provider':'before-provider'}
+write_config(original)
+def unavailable(state):module['fail']('WATCHDOG_FAILED','watchdog unavailable')
+a.start_watchdog=unavailable
+expect('WATCHDOG_FAILED',prepare)
+assert read_config()==original and not os.path.exists(a.state_path)
+`);
+
+check('Codex watchdog survives its setup process exiting without disconnect cleanup', `
+import textwrap
+original={'model':'before','model_provider':'before-provider','model_providers':{}}
+write_config(original)
+settings={'home':home,'binary':fixture,'codex_home':codex_home,'watchdog_policy':{'interval':0.02,'grace':0.4}}
+encoded=module['base64'].b64encode(json.dumps(settings).encode()).decode()
+source=textwrap.dedent('''
+import base64,json,os,runpy,socket
+m=runpy.run_path(${JSON.stringify(adapter)})
+a=m['Adapter'](**json.loads(base64.b64decode('''+repr(encoded)+''')))
+owner='a'*32
+p=a.dispatch({'operation':'prepare','owner':owner})
+sock=socket.socket(socket.AF_UNIX);sock.bind(p['socketPath'])
+a.dispatch({'operation':'apply','owner':owner,'model':'vendor/model','remotePort':13425,'socketPath':p['socketPath']})
+os._exit(0)
+''')
+# Compile explicitly: newer Python -c can dedent implicitly, masking the failure
+# on the older Python versions used by Linux runners.
+compile(source,'<watchdog-setup>','exec')
+parent=subprocess.run([sys.executable,'-I','-c',source],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+assert parent.returncode==0,parent.stderr
+deadline=time.monotonic()+5
+while os.path.exists(a.state_path) and time.monotonic()<deadline:time.sleep(0.02)
+assert not os.path.exists(a.state_path)
+assert read_config()==original,read_config()
+`);
+
+check('Codex expired watchdog cannot restore a replacement window lease', `
+p=prepare()
+with forward(p):apply(p)
+s=state();s['owner']=other
+with a.locked():a.write_state(s)
+module['watch'](a,owner,interval=0.01,grace=0)
+assert state()['owner']==other and read_config()['model_provider']==PROVIDER
+a.dispatch({'operation':'restore','owner':other})
+assert not os.path.exists(a.state_path)
 `);
 
 check('Codex explicit ownerless recovery survives window reload and cannot be claimed by another owner', `

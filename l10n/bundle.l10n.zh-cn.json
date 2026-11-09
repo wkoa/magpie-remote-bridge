@@ -78,6 +78,8 @@
   "Use your local Magpie gateway in this Remote-SSH workspace. Click for actions.": "在当前 Remote-SSH 工作区使用本机 Magpie 网关，点击查看操作。",
   "Used only for this SSH authentication; never saved": "仅用于本次 SSH 认证，不保存密码",
   "Verifying remote access": "验证远端访问",
+  "Restoring Codex configuration": "正在恢复 Codex 原配置",
+  "Could not confirm automatic Codex restoration. Remote recovery will retry after disconnect. If needed, run Restore Codex Configuration when the server is reachable.": "无法确认 Codex 原配置已自动恢复。断开后远端会继续尝试恢复；必要时请在服务器可连接后执行「恢复 Codex 原配置」。",
   "Bridge settings are invalid. Check the port numbers and local SSH paths.": "桥接设置无效，请检查端口范围和本机 SSH 路径。",
   "Set Gateway Key": "设置网关密钥",
   "Checking remote {0} installation": "检查远端 {0} 安装",

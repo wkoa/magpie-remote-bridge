@@ -60,12 +60,14 @@ Claude Code 会读取本机 `~/.claude/settings.json` 中指向当前 Magpie 网
 - 使用官方配置 RPC，只修改远端 `CODEX_HOME/config.toml` 中的模型、默认 provider 和专用的 `magpie_vscode_bridge`。默认 `CODEX_HOME` 为 `~/.codex`；远端 extension host 与 SSH 登录环境必须使用同一目录。不修改第三方扩展文件或 `chatgpt.cliExecutable`；已有自定义 CLI 覆盖时会拒绝启用。
 - **作用域为同一远端账户的 Codex 配置。** 新建 Codex CLI/IDE 会话都可能使用该 provider；已有对话保留原 provider。每个账户只允许一个窗口启用侧边栏桥接，即使 TCP 端口不同也不会覆盖另一个窗口的配置。
 - provider 只保存地址与凭据命令。Codex 通过权限受限的 Unix socket 获取本次临时令牌，socket 经 SSH 转发到本机；令牌不写入配置、脚本、恢复记录或命令参数，不开放无认证 TCP 代理。
-- 保持启用侧边栏的 Magpie 窗口连接。手动断开、重载窗口或重连耗尽会撤销令牌，远端配置保留供恢复。重新连接后执行 **Magpie: 恢复 Codex 原配置（当前远端账户）**，再根据需要重新启用；不会在窗口重载后静默接管旧租约。
+- 手动断开时先自动恢复侧边栏接入前的 Codex 配置，再关闭 SSH 和代理。更换 Host、更新网关密钥、应用连接设置及正常停用扩展也使用此流程；窗口重载会尽力等待恢复完成。
+- 远端在配置前启动独立恢复守护进程。窗口被强制关闭、网络中断或重连耗尽时，凭据通道持续失联约 60 秒后自动恢复；短暂断线后重连成功则继续使用桥接。守护进程只检查私有 socket 的无凭据健康接口，不读取或保存令牌，不会接管新窗口的租约。
+- 恢复失败会保留恢复记录；守护进程继续有限重试。必要时仍可执行 **Magpie: 恢复 Codex 原配置（当前远端账户）** 手动恢复。旧版本已遗留的配置也需使用此命令恢复一次。
 - 恢复通过配置版本检查，只还原仍与插件写入值相同的字段，保留用户后续修改。非敏感恢复记录保存在远端 `CODEX_HOME/.magpie-remote-bridge.json`（0600）；网络中断后仍可恢复。恢复后新建 Codex 对话使用原 provider。
 
 **验证边界：** 已在本机官方内置 app-server 验证配置 RPC、凭据命令认证、新对话 provider 选择及本机模拟 SSE 往返；远端真实侧边栏界面与真实模型请求仍待验收。CLI 的既有验收不能替代侧边栏验收，详见 [验证记录](docs/VALIDATION.md)。
 
-**Codex sidebar (English):** Install the official `openai.chatgpt` extension on the SSH host, run **Magpie: Connect Codex Sidebar (Remote Account)**, and start a new chat. This updates the remote account's Codex provider through its official config RPC. A command obtains the session capability through a private SSH-forwarded Unix socket; credentials are never written to config or command arguments. The remote host needs Python 3, curl and a bundled Codex version with command-based provider auth. macOS/Linux clients and Linux x64/ARM64 servers are supported. One window may own the sidebar provider per remote account. Keep that window connected; after disconnect or reload, reconnect and use **Magpie: Restore Codex Configuration (Remote Account)** before enabling again. Restoration preserves later user edits. Remote sidebar UI and live model acceptance remain pending.
+**Codex sidebar (English):** Install the official `openai.chatgpt` extension on the SSH host, run **Magpie: Connect Codex Sidebar (Remote Account)**, and start a new chat. This updates the remote account's Codex provider through its official config RPC. A command obtains the session capability through a private SSH-forwarded Unix socket; credentials are never written to config or command arguments. The remote host needs Python 3, curl and a bundled Codex version with command-based provider auth. macOS/Linux clients and Linux x64/ARM64 servers are supported. One window may own the sidebar provider per remote account. Disconnect automatically restores the previous configuration before closing SSH. A detached remote watchdog restores it after about 60 seconds of continuous credential-channel loss, including a forced window close; a brief outage can reconnect within that grace period. Restoration preserves later user edits. If recovery fails or an older version left configuration behind, use **Magpie: Restore Codex Configuration (Remote Account)**. Remote sidebar UI and live model acceptance remain pending.
 
 ## 其他终端和远端扩展
 
@@ -85,7 +87,7 @@ Claude Code 会读取本机 `~/.claude/settings.json` 中指向当前 Magpie 网
 | 命令 | 用途 |
 | --- | --- |
 | Magpie: 连接本机网关到远端 | 检查本机网关，建立隧道，再从远端发起 HTTP 验证 |
-| Magpie: 断开远端桥接 | 结束隧道、关闭代理、销毁插件创建的终端 |
+| Magpie: 断开远端桥接 | 自动恢复 Codex 原配置，再结束隧道、关闭代理、销毁插件创建的终端 |
 | Magpie: 更改当前工作区的 SSH Host | 清除当前工作区的映射并重新选择 |
 | Magpie: 打开预配置的远端终端 | 新终端自动携带网关地址和临时令牌 |
 | Magpie: 在远端启动 Claude Code | 使用本机模型环境或显式选择的模型 |

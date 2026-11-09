@@ -81,8 +81,7 @@ test('real Python adapter, SSH protocol and broker interoperate through enable, 
   await sidebar.forwarding.stop(); await new Promise(resolve => setImmediate(resolve));
   await sidebar.reconnect(tunnel);
   assert.deepEqual(await request(sidebar.socketPath), { status: 200, body: session.proxy.token + '\n' });
-  await sidebar.close();
-  const result = await tunnel.codex({ operation: 'restore' });
+  const result = await sidebar.restore(tunnel);
   assert.equal(result.ok, true); assert.equal(result.restored.length, 3);
   config = JSON.parse(await fs.readFile(path.join(codexHome, 'config.toml')));
   assert.equal(config.model, 'original-model'); assert.equal(config.model_provider, 'original-provider'); assert.equal(config.unrelated, 'preserve');

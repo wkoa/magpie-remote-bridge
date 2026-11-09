@@ -13,6 +13,15 @@ test('sidebar command opens the official UI, shares setup, and revokes on discon
   assert.ok(f.executions.some(args => args[0] === 'chatgpt.openSidebar'));
   assert.ok(f.infos.some(text => text.includes('remote account')));
   await f.run('disconnect'); assert.equal(f.sidebars[0].closed, true); assert.equal(f.proxies[0].closed, true);
+  assert.deepEqual(f.tunnels[0].codexCalls, [{ operation: 'restore', owner: f.sidebars[0].owner }]);
+});
+
+test('automatic restore failure warns while completing disconnect', async t => {
+  const f = fixture({ codex: async () => { throw new Error('restore unavailable'); } }); t.after(f.dispose);
+  await f.run('codexSidebar'); await f.run('disconnect');
+  assert.equal(f.tunnels[0].stopped, true); assert.equal(f.proxies[0].closed, true);
+  assert.ok(f.warnings.some(text => text.includes('automatic Codex restoration')));
+  assert.deepEqual(f.errors, []);
 });
 
 test('sidebar accepts null, missing, empty and whitespace Codex CLI defaults', async t => {
@@ -60,6 +69,7 @@ test('explicit restoration closes the private channel first and preserves user e
   assert.deepEqual(f.tunnels[0].codexCalls, [{ operation: 'restore' }]);
   assert.ok(f.infos.some(text => text.includes('Preserved 1 fields')));
   assert.equal(f.tunnels[0].stopped, undefined); assert.equal(f.proxies[0].closed, undefined);
+  await f.run('disconnect'); assert.equal(f.tunnels[0].codexCalls.length, 1);
 });
 
 test('sidebar reconnect failure closes its credentials while leaving the CLI bridge usable', async t => {

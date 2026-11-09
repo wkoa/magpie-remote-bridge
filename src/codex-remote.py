@@ -9,8 +9,10 @@ import re
 import selectors
 import shutil
 import signal
+import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -19,6 +21,7 @@ STATE_NAME = ".magpie-remote-bridge.json"
 OWNER_RE = re.compile(r"[0-9a-fA-F]{32}\Z")
 MAX_OUTPUT = 2 * 1024 * 1024
 RPC_TIMEOUT = 12
+WATCHDOG_SOURCE = None
 
 
 class AdapterError(Exception):
@@ -248,7 +251,8 @@ def provider_config(port, socket_path, curl):
 
 class Adapter:
     # Direct dependency injection is reserved for local tests; main never uses request paths.
-    def __init__(self, home=None, binary=None, rpc_factory=Rpc, codex_home=None):
+    def __init__(self, home=None, binary=None, rpc_factory=Rpc, codex_home=None,
+                 watchdog_source=None, watchdog_policy=None):
         self.home = os.path.abspath(home or os.path.expanduser("~"))
         self.codex_home = os.path.abspath(codex_home or os.environ.get("CODEX_HOME") or os.path.join(self.home, ".codex"))
         self.binary_override = binary
@@ -256,6 +260,8 @@ class Adapter:
         self.state_path = os.path.join(self.codex_home, STATE_NAME)
         self.directory_fd = None
         self.curl = None
+        self.watchdog_source = watchdog_source
+        self.watchdog_policy = watchdog_policy or {}
 
     def runtime(self):
         if os.name != "posix":
@@ -514,6 +520,14 @@ class Adapter:
                 state.update(phase="prepared", socketPath=os.path.join(directory, "credentials.sock"),
                              socketIdentity=[info.st_dev, info.st_ino])
                 self.write_state(state)
+                # Recovery is armed before configuration can be applied, even
+                # when setup is interrupted before its response reaches VS Code.
+                try:
+                    self.start_watchdog(state)
+                except BaseException:
+                    self.remove_socket(state, remove_directory=True)
+                    self.delete_state()
+                    raise
                 return {key: state[key] for key in ("socketPath", "binary", "version")}
             if state is None:
                 if operation == "restore":
@@ -576,6 +590,36 @@ class Adapter:
             self.batch_write(rpc, list(applied.items()), path, version)
         return {"applied": True, "model": model, "provider": PROVIDER}
 
+    def start_watchdog(self, state):
+        source = self.watchdog_source
+        if source is None:
+            with open(__file__, "r", encoding="utf-8") as handle:
+                source = handle.read()
+        settings = {"home": self.home, "codex_home": self.codex_home, "binary": self.binary_override}
+        encoded = base64.b64encode(json.dumps(settings).encode()).decode("ascii")
+        policy = base64.b64encode(json.dumps(self.watchdog_policy).encode()).decode("ascii")
+        script = (source + '\nprint("READY", flush=True)\n'
+                  + 'watch(Adapter(**json.loads(base64.b64decode("' + encoded + '"))), '
+                  + repr(state["owner"]) + ', **json.loads(base64.b64decode("' + policy + '")))\n')
+        process = subprocess.Popen([sys.executable, "-I", "-"], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   cwd=self.home, start_new_session=True, close_fds=True)
+        try:
+            process.stdin.write(script.encode("utf-8"))
+            process.stdin.close()
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                if not selector.select(5) or os.read(process.stdout.fileno(), 64) != b"READY\n":
+                    fail("WATCHDOG_FAILED", "Remote automatic recovery could not be started; Codex configuration was not changed.")
+        except BaseException:
+            process.kill()
+            process.wait(timeout=2)
+            raise
+        finally:
+            process.stdout.close()
+            if not process.stdin.closed:
+                process.stdin.close()
+
     def restore(self, state):
         restored, preserved = [], []
         if state["phase"] == "applied":
@@ -616,9 +660,54 @@ class Adapter:
         os.fsync(self.directory_fd)
 
 
+def credential_channel_alive(path):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(3)
+            connection.connect(path)
+            connection.sendall(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            line = b""
+            while b"\n" not in line and len(line) < 512:
+                chunk = connection.recv(512 - len(line))
+                if not chunk:
+                    return False
+                line += chunk
+            return line.split(b"\r\n", 1)[0].split(b" ")[1:2] == [b"204"]
+    except OSError:
+        return False
+
+
+def watch(adapter, owner, interval=2, grace=60, max_failures=12):
+    """Restore only this lease after a sustained loss of its private channel."""
+    last_seen, failures = time.monotonic(), 0
+    while True:
+        try:
+            with adapter.locked() as exists:
+                state = adapter.read_state() if exists else None
+                if not state or state["owner"].lower() != owner:
+                    return
+                adapter.socket_directory(state)
+                path = state["socketPath"]
+            if credential_channel_alive(path):
+                last_seen = time.monotonic()
+                failures = 0
+            elif time.monotonic() - last_seen >= grace:
+                adapter.dispatch({"operation": "restore", "owner": owner})
+                return
+        except (AdapterError, OSError) as error:
+            if isinstance(error, AdapterError) and error.code == "LEASE_BUSY":
+                time.sleep(interval)
+                continue
+            failures += 1
+            if failures >= max_failures:
+                # Preserve recovery metadata for the explicit restore command.
+                return
+        time.sleep(interval)
+
+
 def main(request):
     try:
-        result = Adapter().dispatch(request)
+        result = Adapter(watchdog_source=WATCHDOG_SOURCE).dispatch(request)
         response = dict(result, ok=True)
     except AdapterError as error:
         response = {"ok": False, "code": error.code, "message": error.message}

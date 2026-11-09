@@ -34,10 +34,12 @@ async function startCredentialBroker(token, { available = () => true, platform =
       request.on('error', () => {}); response.on('error', () => {});
       response.setHeader('Cache-Control', 'no-store');
       response.setHeader('Connection', 'close');
-      if (request.method !== 'GET' || request.url !== '/token' || request.headers['transfer-encoding'] ||
+      if (request.method !== 'GET' || !['/token', '/health'].includes(request.url) || request.headers['transfer-encoding'] ||
           (request.headers['content-length'] && request.headers['content-length'] !== '0')) {
         response.writeHead(404); response.end(); request.resume(); return;
       }
+      // The remote recovery watchdog checks liveness without requesting a token.
+      if (request.url === '/health') { response.writeHead(closed ? 503 : 204); response.end(); return; }
       if (closed || !available()) { response.writeHead(503); response.end(); return; }
       response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
       response.end(token + '\n');
